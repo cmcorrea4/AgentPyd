@@ -1,3 +1,5 @@
+
+```python
 import os
 import streamlit as st
 from PyPDF2 import PdfReader
@@ -265,11 +267,13 @@ if os.path.exists(pdf_path):
         input_keys=["input", "agent_scratchpad"]
     )
     
+    # Corrección en la configuración del AgentExecutor
     agent_executor = AgentExecutor.from_agent_and_tools(
         agent=agent,
         tools=tools,
-        verbose=True,
-        return_intermediate_steps=True
+        handle_parsing_errors=True,
+        return_intermediate_steps=True,
+        max_iterations=10
     )
 
 # Interfaz principal
