@@ -7,7 +7,7 @@ from langchain.vectorstores import FAISS
 from langchain.chains.question_answering import load_qa_chain
 from langchain.llms import OpenAI
 from langchain.callbacks import get_openai_callback
-from langchain.agents import Tool, AgentExecutor, LLMSingleActionAgent
+from langchain.agents import Tool, AgentExecutor, LLMSingleActionAgent, AgentOutputParser
 from langchain.prompts import StringPromptTemplate
 from langchain.schema import AgentAction, AgentFinish
 from langchain.chains import LLMChain
@@ -28,7 +28,7 @@ MQTT_BROKER = "157.230.214.127"
 MQTT_PORT = 1883
 MQTT_TOPIC = "sensor_st"
 
-# Variables de estado para los datos del sensor
+# Variables de estado
 if 'sensor_data' not in st.session_state:
     st.session_state.sensor_data = None
 
@@ -53,25 +53,29 @@ class CustomPromptTemplate(StringPromptTemplate):
         return self.template.format(**kwargs)
 
 # Clase para procesar la salida del agente
-class CustomOutputParser:
-    def parse(self, text: str) -> Union[AgentAction, AgentFinish]:
-        if "Acción Final:" in text:
+class CustomOutputParser(AgentOutputParser):
+    def parse(self, llm_output: str) -> Union[AgentAction, AgentFinish]:
+        if "Acción Final:" in llm_output:
             return AgentFinish(
-                return_values={"output": text.split("Acción Final:")[-1].strip()},
-                log=text
+                return_values={"output": llm_output.split("Acción Final:")[-1].strip()},
+                log=llm_output
             )
-            
-        match = re.search(r"Acción:\s*(.*?)\nEntrada:\s*(.*)", text, re.DOTALL)
+        
+        match = re.search(r"Acción:\s*(.*?)\nEntrada:\s*(.*)", llm_output, re.DOTALL)
         if not match:
             return AgentFinish(
-                return_values={"output": text.strip()},
-                log=text
+                return_values={"output": llm_output.strip()},
+                log=llm_output
             )
-            
+        
         action = match.group(1).strip()
         action_input = match.group(2).strip()
         
-        return AgentAction(tool=action, tool_input=action_input.strip(" ").strip('"'), log=text)
+        return AgentAction(tool=action, tool_input=action_input.strip(" ").strip('"'), log=llm_output)
+        
+    @property
+    def _type(self) -> str:
+        return "custom_output_parser"
 
 # Funciones de utilidad
 def get_mqtt_message():
@@ -104,21 +108,27 @@ def get_mqtt_message():
         st.error(f"Error de conexión: {e}")
         return None
 
-def analyze_temperature(temp: float) -> dict:
-    temp = float(temp)
-    if temp < 18:
-        return {"status": "Frío", "recommendation": "Considere aumentar la temperatura"}
-    elif temp > 26:
-        return {"status": "Caliente", "recommendation": "Considere reducir la temperatura"}
-    return {"status": "Confortable", "recommendation": "Temperatura ideal"}
+def analyze_temperature(temp: str) -> dict:
+    try:
+        temp = float(temp)
+        if temp < 18:
+            return {"status": "Frío", "recommendation": "Considere aumentar la temperatura"}
+        elif temp > 26:
+            return {"status": "Caliente", "recommendation": "Considere reducir la temperatura"}
+        return {"status": "Confortable", "recommendation": "Temperatura ideal"}
+    except:
+        return {"status": "Error", "recommendation": "No se pudo analizar la temperatura"}
 
-def analyze_humidity(humidity: float) -> dict:
-    humidity = float(humidity)
-    if humidity < 30:
-        return {"status": "Baja", "recomendación": "Use un humidificador"}
-    elif humidity > 60:
-        return {"status": "Alta", "recomendación": "Use un deshumidificador"}
-    return {"status": "Óptima", "recomendación": "Nivel ideal"}
+def analyze_humidity(humidity: str) -> dict:
+    try:
+        humidity = float(humidity)
+        if humidity < 30:
+            return {"status": "Baja", "recomendación": "Use un humidificador"}
+        elif humidity > 60:
+            return {"status": "Alta", "recomendación": "Use un deshumidificador"}
+        return {"status": "Óptima", "recomendación": "Nivel ideal"}
+    except:
+        return {"status": "Error", "recomendación": "No se pudo analizar la humedad"}
 
 def text_to_speech(text, tld):
     tts = gTTS(text, "es", tld, slow=False)
@@ -134,9 +144,13 @@ st.set_page_config(page_title="UMI - Asistente Inteligente", layout="wide")
 
 # Título y animación
 st.title('UMI - Asistente Inteligente 💬')
-with open('umbirdp.json') as source:
-    animation = json.load(source)
-st_lottie(animation, width=350)
+
+try:
+    with open('umbird.json') as source:
+        animation = json.load(source)
+    st_lottie(animation, width=350)
+except Exception as e:
+    st.error(f"Error al cargar la animación: {e}")
 
 # Crear directorio temporal
 try:
@@ -250,8 +264,8 @@ with col1:
                 st.metric("Temperatura", f"{temp}°C")
                 st.metric("Humedad", f"{hum}%")
                 
-                temp_analysis = analyze_temperature(float(temp))
-                hum_analysis = analyze_humidity(float(hum))
+                temp_analysis = analyze_temperature(temp)
+                hum_analysis = analyze_humidity(hum)
                 
                 st.write("### Análisis")
                 st.write(f"Temperatura: {temp_analysis['status']}")
@@ -291,6 +305,7 @@ with col2:
                     
             except Exception as e:
                 st.error(f"Error al procesar la consulta: {str(e)}")
+                st.error("Por favor, intenta reformular tu pregunta")
 
 # Información en la barra lateral
 with st.sidebar:
