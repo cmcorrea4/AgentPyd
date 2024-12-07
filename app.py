@@ -31,15 +31,8 @@ MQTT_TOPIC = "sensor_st"
 # Variables de estado
 if 'sensor_data' not in st.session_state:
     st.session_state.sensor_data = None
-
-# Función para obtener datos actuales
-def get_current_conditions() -> str:
-    """Obtiene las condiciones actuales del sensor."""
-    if 'sensor_data' in st.session_state and st.session_state.sensor_data:
-        temp = st.session_state.sensor_data.get('Temp', 'N/A')
-        hum = st.session_state.sensor_data.get('Hum', 'N/A')
-        return f"Temperatura actual: {temp}°C, Humedad actual: {hum}%"
-    return "No hay datos disponibles del sensor. Por favor, obtén una lectura primero."
+if 'last_response' not in st.session_state:
+    st.session_state.last_response = None
 
 # Clase para el template del prompt
 class CustomPromptTemplate(StringPromptTemplate):
@@ -85,6 +78,14 @@ class CustomOutputParser(AgentOutputParser):
     @property
     def _type(self) -> str:
         return "custom_output_parser"
+
+def get_current_conditions() -> str:
+    """Obtiene las condiciones actuales del sensor."""
+    if 'sensor_data' in st.session_state and st.session_state.sensor_data:
+        temp = st.session_state.sensor_data.get('Temp', 'N/A')
+        hum = st.session_state.sensor_data.get('Hum', 'N/A')
+        return f"Temperatura actual: {temp}°C, Humedad actual: {hum}%"
+    return "No hay datos disponibles del sensor. Por favor, obtén una lectura primero."
 
 def get_mqtt_message():
     message_received = {"received": False, "payload": None}
@@ -303,8 +304,7 @@ with col2:
     Ejemplos de preguntas que puedes hacer:
     - Considerando la temperatura y humedad actuales, ¿qué plantas me recomiendas?
     - ¿Las condiciones actuales son buenas para plantas tropicales?
-    - ¿Qué ajustes necesito hacer en el ambiente para mejorar las condiciones de mis plantas?
-    - Según las condiciones actuales, ¿qué cuidados especiales necesitan mis plantas?
+    - ¿Qué ajustes necesito hacer en el ambiente para mejorar las condiciones?
     """)
     
     user_question = st.text_area("¿Qué deseas saber?")
@@ -323,6 +323,8 @@ with col2:
                     )
                     
                     response = result['output']
+                    st.session_state.last_response = response
+                    
                     st.write("### Respuesta:")
                     st.write(response)
                     
@@ -332,16 +334,21 @@ with col2:
                             st.write(f"**Acción:** {step[0]}")
                             st.write(f"**Resultado:** {step[1]}")
                             st.write("---")
-                    
-                    if st.button("Escuchar"):
-                        result_audio, _ = text_to_speech(response, 'es-es')
-                        audio_file = open(f"temp/{result_audio}.mp3", "rb")
-                        audio_bytes = audio_file.read()
-                        st.audio(audio_bytes, format="audio/mp3", start_time=0)
                         
                 except Exception as e:
                     st.error(f"Error al procesar la consulta: {str(e)}")
                     st.error("Por favor, intenta reformular tu pregunta")
+
+    # Botón de audio separado
+    if st.session_state.last_response:
+        if st.button("Escuchar"):
+            try:
+                result_audio, _ = text_to_speech(st.session_state.last_response, 'es-es')
+                audio_file = open(f"temp/{result_audio}.mp3", "rb")
+                audio_bytes = audio_file.read()
+                st.audio(audio_bytes, format="audio/mp3", start_time=0)
+            except Exception as e:
+                st.error(f"Error al generar el audio: {str(e)}")
 
 # Información en la barra lateral
 with st.sidebar:
@@ -355,4 +362,4 @@ with st.sidebar:
     - Mostrar el proceso de razonamiento
     
     Basado en los datos del sensor y la información del documento.
-    """)
+    ""
