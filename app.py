@@ -3,7 +3,7 @@ import streamlit as st
 from pydantic import BaseModel, Field
 from typing import List, Optional, Dict, Any
 from PyPDF2 import PdfReader
-from langchain_text_splitters import CharacterTextSplitter
+from langchain_community.text_splitter import CharacterTextSplitter
 from langchain_openai import OpenAIEmbeddings, OpenAI
 from langchain_community.vectorstores import FAISS
 from langchain_core.prompts import PromptTemplate
