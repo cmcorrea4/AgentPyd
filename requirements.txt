@@ -12,3 +12,4 @@ streamlit-lottie==0.0.5
 gTTS==2.4.0
 python-dotenv==1.0.0
 tiktoken==0.5.2
+langchain-text-splitters==0.0.1
