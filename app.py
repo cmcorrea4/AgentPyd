@@ -362,4 +362,4 @@ with st.sidebar:
     - Mostrar el proceso de razonamiento
     
     Basado en los datos del sensor y la información del documento.
-    ""
+    """
