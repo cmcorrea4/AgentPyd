@@ -2,8 +2,8 @@ streamlit==1.31.1
 pydantic==1.10.13
 PyPDF2==3.0.1
 Pillow==10.0.1
-langchain==0.1.0
-openai==1.6.1
+langchain==0.0.350
+openai==0.28.1
 faiss-cpu==1.7.4
 paho-mqtt==1.6.1
 streamlit-lottie==0.0.5
