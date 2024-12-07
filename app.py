@@ -146,7 +146,7 @@ st.set_page_config(page_title="UMI - Asistente Inteligente", layout="wide")
 st.title('UMI - Asistente Inteligente 💬')
 
 try:
-    with open('umbird.json') as source:
+    with open('umbirdp.json') as source:
         animation = json.load(source)
     st_lottie(animation, width=350)
 except Exception as e:
