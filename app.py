@@ -289,13 +289,24 @@ with col2:
     if user_question and 'agent_executor' in locals():
         with st.spinner('Procesando tu consulta...'):
             try:
-                response = agent_executor.run({
-                    'input': user_question,
-                    'agent_scratchpad': ''
-                })
+                result = agent_executor(
+                    {
+                        'input': user_question,
+                        'agent_scratchpad': ''
+                    }
+                )
                 
+                response = result['output']
                 st.write("### Respuesta:")
                 st.write(response)
+                
+                # Mostrar pasos intermedios
+                if st.checkbox("Mostrar proceso de razonamiento"):
+                    st.write("### Proceso de razonamiento:")
+                    for step in result['intermediate_steps']:
+                        st.write(f"**Acción:** {step[0]}")
+                        st.write(f"**Resultado:** {step[1]}")
+                        st.write("---")
                 
                 if st.button("Escuchar"):
                     result_audio, _ = text_to_speech(response, 'es-es')
@@ -316,6 +327,7 @@ with st.sidebar:
     - Analizar condiciones ambientales
     - Proporcionar recomendaciones personalizadas
     - Convertir respuestas a audio
+    - Mostrar el proceso de razonamiento
     
     Basado en los datos del sensor y la información del documento.
     """)
