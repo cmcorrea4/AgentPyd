@@ -1,85 +1,72 @@
 import os
 import streamlit as st
-from pydantic import BaseModel, Field
-from typing import List, Optional, Dict, Any
 from PyPDF2 import PdfReader
-from langchain_community.text_splitter import CharacterTextSplitter
-from langchain_openai import OpenAIEmbeddings, OpenAI
-from langchain_community.vectorstores import FAISS
-from langchain_core.prompts import PromptTemplate
-from langchain_core.output_parsers import StrOutputParser
-from langchain_core.runnables import RunnablePassthrough
-import json
-import paho.mqtt.client as mqtt
+from langchain.text_splitter import CharacterTextSplitter
+from langchain.embeddings.openai import OpenAIEmbeddings
+from langchain.vectorstores import FAISS
+from langchain.chains.question_answering import load_qa_chain
+from langchain.llms import OpenAI
+from langchain.callbacks import get_openai_callback
+from langchain.agents import Tool, AgentExecutor, LLMSingleActionAgent, AgentOutputParser
+from langchain.prompts import StringPromptTemplate
+from langchain.schema import AgentAction, AgentFinish
+from langchain.chains import LLMChain
+import PyPDF2
+from PIL import Image as Image, ImageOps as ImagOps
+import glob
+from gtts import gTTS
 import time
 from streamlit_lottie import st_lottie
-from gtts import gTTS
-import glob
+import json
+import paho.mqtt.client as mqtt
+import pytz
+from typing import List, Union, Optional
+import re
 
-# Configuraciones MQTT
+# Configuración MQTT
 MQTT_BROKER = "157.230.214.127"
 MQTT_PORT = 1883
 MQTT_TOPIC = "sensor_st"
 
-# Modelos de datos
-class Tool(BaseModel):
-    name: str
-    description: str
+# Clase personalizada para el prompt del agente
+class CustomPromptTemplate(StringPromptTemplate):
+    template: str
+    tools: List[Tool]
     
-    def execute(self, **kwargs) -> Dict[str, Any]:
-        pass
-
-class TemperatureAnalysisTool(Tool):
-    name: str = "analyze_temperature"
-    description: str = "Analiza datos de temperatura"
-    
-    def execute(self, **kwargs) -> Dict[str, Any]:
-        temp = kwargs.get('temperature', 0)
-        operation = kwargs.get('operation', 'convert')
+    def format(self, **kwargs) -> str:
+        intermediate_steps = kwargs.pop("intermediate_steps")
+        thoughts = ""
+        for action, observation in intermediate_steps:
+            thoughts += f"\nAcción: {action}\nObservación: {observation}\n"
         
-        if operation == 'convert':
-            fahrenheit = (temp * 9/5) + 32
-            kelvin = temp + 273.15
-            return {
-                "celsius": temp,
-                "fahrenheit": fahrenheit,
-                "kelvin": kelvin
-            }
-        elif operation == 'comfort':
-            if temp < 18:
-                return {"status": "Frío", "recommendation": "Considere aumentar la temperatura"}
-            elif temp > 26:
-                return {"status": "Caliente", "recommendation": "Considere reducir la temperatura"}
-            else:
-                return {"status": "Confortable", "recommendation": "Temperatura ideal"}
+        kwargs["agent_scratchpad"] = thoughts
+        kwargs["tools"] = "\n".join([f"{tool.name}: {tool.description}" for tool in self.tools])
+        kwargs["tool_names"] = ", ".join([tool.name for tool in self.tools])
+        return self.template.format(**kwargs)
 
-class HumidityAnalysisTool(Tool):
-    name: str = "analyze_humidity"
-    description: str = "Analiza datos de humedad"
-    
-    def execute(self, **kwargs) -> Dict[str, Any]:
-        humidity = kwargs.get('humidity', 0)
+# Clase para procesar la salida del agente
+class CustomOutputParser(AgentOutputParser):
+    def parse(self, llm_output: str) -> Union[AgentAction, AgentFinish]:
+        if "Acción Final:" in llm_output:
+            return AgentFinish(
+                return_values={"output": llm_output.split("Acción Final:")[-1].strip()},
+                log=llm_output,
+            )
         
-        if humidity < 30:
-            status = "Baja"
-            recommendation = "Considere usar un humidificador"
-        elif humidity > 60:
-            status = "Alta"
-            recommendation = "Considere usar un deshumidificador"
-        else:
-            status = "Óptima"
-            recommendation = "Nivel de humedad ideal"
-            
-        return {
-            "humidity": humidity,
-            "status": status,
-            "recommendation": recommendation,
-            "comfort_index": min(100, max(0, (humidity - 30) * 100 / 30))
-        }
+        match = re.search(r"Acción:\s*(.*?)\nEntrada:\s*(.*)", llm_output, re.DOTALL)
+        if not match:
+            return AgentFinish(
+                return_values={"output": llm_output.strip()},
+                log=llm_output,
+            )
+        
+        action = match.group(1).strip()
+        action_input = match.group(2).strip()
+        
+        return AgentAction(tool=action, tool_input=action_input.strip(" ").strip('"'), log=llm_output)
 
 # Funciones MQTT
 def get_mqtt_message():
-    """Función para obtener un único mensaje MQTT"""
     message_received = {"received": False, "payload": None}
     
     def on_message(client, userdata, message):
@@ -105,12 +92,24 @@ def get_mqtt_message():
         client.disconnect()
         
         return message_received["payload"]
-    
     except Exception as e:
         st.error(f"Error de conexión: {e}")
         return None
 
-# Función de texto a voz
+def analyze_temperature(temp: float) -> dict:
+    if temp < 18:
+        return {"status": "Frío", "recommendation": "Considere aumentar la temperatura"}
+    elif temp > 26:
+        return {"status": "Caliente", "recommendation": "Considere reducir la temperatura"}
+    return {"status": "Confortable", "recommendation": "Temperatura ideal"}
+
+def analyze_humidity(humidity: float) -> dict:
+    if humidity < 30:
+        return {"status": "Baja", "recomendación": "Use un humidificador"}
+    elif humidity > 60:
+        return {"status": "Alta", "recomendación": "Use un deshumidificador"}
+    return {"status": "Óptima", "recomendación": "Nivel ideal"}
+
 def text_to_speech(text, tld):
     tts = gTTS(text, "es", tld, slow=False)
     try:
@@ -123,16 +122,14 @@ def text_to_speech(text, tld):
 # Configuración de la página
 st.set_page_config(page_title="UMI - Asistente Inteligente", layout="wide")
 
-# Configuración de OpenAI
-os.environ['OPENAI_API_KEY'] = st.secrets["settings"]["key"]
-
-# UI Principal
-st.title("🤖 UMI - Asistente Inteligente")
-
-# Cargar animación
+# Título y animación
+st.title('UMI - Asistente Inteligente 💬')
 with open('umbird.json') as source:
     animation = json.load(source)
 st_lottie(animation, width=350)
+
+# Configuración de OpenAI
+os.environ['OPENAI_API_KEY'] = st.secrets["settings"]["key"]
 
 # Crear directorio temporal
 try:
@@ -140,19 +137,14 @@ try:
 except:
     pass
 
-# Inicialización de herramientas
-temp_tool = TemperatureAnalysisTool()
-humidity_tool = HumidityAnalysisTool()
-
-# Procesar PDF
+# Procesar PDF y crear base de conocimiento
 pdf_path = 'plantas.pdf'
 if os.path.exists(pdf_path):
     pdf_reader = PdfReader(pdf_path)
     text = ""
     for page in pdf_reader.pages:
         text += page.extract_text()
-        
-    # Crear embeddings y base de conocimiento
+    
     text_splitter = CharacterTextSplitter(
         separator="\n",
         chunk_size=500,
@@ -161,28 +153,76 @@ if os.path.exists(pdf_path):
     )
     chunks = text_splitter.split_text(text)
     
-    # Inicializar embeddings y vectorstore
     embeddings = OpenAIEmbeddings()
-    vectorstore = FAISS.from_texts(chunks, embeddings)
+    knowledge_base = FAISS.from_texts(chunks, embeddings)
     
-    # Crear cadena de RAG
-    template = """Pregunta: {question}
-    Contexto: {context}
-    Respuesta útil:"""
+    # Definir herramientas del agente
+    tools = [
+        Tool(
+            name="Consultar_Documento",
+            func=lambda q: knowledge_base.similarity_search(q)[0].page_content,
+            description="Útil para buscar información en el documento sobre plantas"
+        ),
+        Tool(
+            name="Analizar_Temperatura",
+            func=analyze_temperature,
+            description="Analiza si la temperatura es adecuada"
+        ),
+        Tool(
+            name="Analizar_Humedad",
+            func=analyze_humidity,
+            description="Analiza si la humedad es adecuada"
+        )
+    ]
     
-    prompt = PromptTemplate.from_template(template)
+    # Template para el prompt del agente
+    template = """Eres un asistente experto en plantas y condiciones ambientales.
     
-    retriever = vectorstore.as_retriever()
+    Tienes acceso a las siguientes herramientas:
+    {tools}
+    
+    Usa el siguiente formato:
+    Pregunta: la pregunta que debes responder
+    Pensamiento: piensa paso a paso qué debes hacer
+    Acción: la acción a tomar (una de {tool_names})
+    Entrada: la entrada para la herramienta
+    Observación: el resultado de la acción
+    ... (este patrón Pensamiento/Acción/Entrada/Observación puede repetirse N veces)
+    Pensamiento: Ahora sé la respuesta final
+    Acción Final: la respuesta final
+
+    Comienza!
+    
+    {agent_scratchpad}
+    
+    Pregunta: {input}
+    Pensamiento:"""
+
+    # Configurar el agente
+    prompt = CustomPromptTemplate(
+        template=template,
+        tools=tools,
+        input_variables=["input", "intermediate_steps", "agent_scratchpad"]
+    )
+    
+    output_parser = CustomOutputParser()
     llm = OpenAI(temperature=0)
+    llm_chain = LLMChain(llm=llm, prompt=prompt)
     
-    rag_chain = (
-        {"context": retriever, "question": RunnablePassthrough()}
-        | prompt
-        | llm
-        | StrOutputParser()
+    agent = LLMSingleActionAgent(
+        llm_chain=llm_chain,
+        output_parser=output_parser,
+        stop=["\nObservación:"],
+        allowed_tools=[tool.name for tool in tools]
+    )
+    
+    agent_executor = AgentExecutor.from_agent_and_tools(
+        agent=agent,
+        tools=tools,
+        verbose=True
     )
 
-# Layout principal
+# Interfaz principal
 col1, col2 = st.columns([1, 2])
 
 with col1:
@@ -191,45 +231,52 @@ with col1:
         with st.spinner('Obteniendo datos del sensor...'):
             sensor_data = get_mqtt_message()
             if sensor_data:
+                st.session_state.sensor_data = sensor_data
                 st.success("Datos recibidos")
-                st.metric("Temperatura", f"{sensor_data.get('Temp', 'N/A')}°C")
-                st.metric("Humedad", f"{sensor_data.get('Hum', 'N/A')}%")
+                temp = sensor_data.get('Temp')
+                hum = sensor_data.get('Hum')
                 
-                # Análisis de temperatura
-                temp_analysis = temp_tool.execute(
-                    temperature=float(sensor_data['Temp']),
-                    operation='comfort'
-                )
-                # Análisis de humedad
-                hum_analysis = humidity_tool.execute(
-                    humidity=float(sensor_data['Hum'])
-                )
+                st.metric("Temperatura", f"{temp}°C")
+                st.metric("Humedad", f"{hum}%")
                 
-                st.write("### Análisis de Temperatura")
-                st.write(f"Estado: {temp_analysis['status']}")
+                temp_analysis = analyze_temperature(float(temp))
+                hum_analysis = analyze_humidity(float(hum))
+                
+                st.write("### Análisis")
+                st.write(f"Temperatura: {temp_analysis['status']}")
                 st.write(f"Recomendación: {temp_analysis['recommendation']}")
-                
-                st.write("### Análisis de Humedad")
-                st.write(f"Estado: {hum_analysis['status']}")
-                st.write(f"Recomendación: {hum_analysis['recommendation']}")
-                st.progress(int(hum_analysis['comfort_index']))
+                st.write(f"Humedad: {hum_analysis['status']}")
+                st.write(f"Recomendación: {hum_analysis['recomendación']}")
             else:
                 st.warning("No se recibieron datos del sensor")
 
 with col2:
-    st.subheader("Realiza tu consulta")
-    user_question = st.text_area("Escribe tu pregunta aquí:")
+    st.subheader("Consulta al Asistente")
+    user_question = st.text_area("¿Qué deseas saber?")
     
-    if user_question and 'rag_chain' in locals():
-        with st.spinner('Analizando tu pregunta...'):
-            response = rag_chain.invoke(user_question)
-            
-            st.write("### Respuesta:")
-            st.write(response)
-            
-            # Botón de audio
-            if st.button("Escuchar"):
-                result_audio, _ = text_to_speech(response, 'es-es')
-                audio_file = open(f"temp/{result_audio}.mp3", "rb")
-                audio_bytes = audio_file.read()
-                st.audio(audio_bytes, format="audio/mp3", start_time=0)
+    if user_question and 'agent_executor' in locals():
+        with st.spinner('Procesando tu consulta...'):
+            try:
+                response = agent_executor.run(user_question)
+                st.write("### Respuesta:")
+                st.write(response)
+                
+                if st.button("Escuchar"):
+                    result_audio, _ = text_to_speech(response, 'es-es')
+                    audio_file = open(f"temp/{result_audio}.mp3", "rb")
+                    audio_bytes = audio_file.read()
+                    st.audio(audio_bytes, format="audio/mp3", start_time=0)
+                    
+            except Exception as e:
+                st.error(f"Error al procesar la consulta: {str(e)}")
+
+# Información adicional
+with st.sidebar:
+    st.subheader("Acerca del Asistente")
+    st.write("""
+    Este asistente puede:
+    - Responder preguntas sobre plantas
+    - Analizar condiciones ambientales
+    - Proporcionar recomendaciones
+    - Convertir respuestas a audio
+    """)
