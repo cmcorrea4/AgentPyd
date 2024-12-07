@@ -32,6 +32,15 @@ MQTT_TOPIC = "sensor_st"
 if 'sensor_data' not in st.session_state:
     st.session_state.sensor_data = None
 
+# Función para obtener datos actuales
+def get_current_conditions() -> str:
+    """Obtiene las condiciones actuales del sensor."""
+    if 'sensor_data' in st.session_state and st.session_state.sensor_data:
+        temp = st.session_state.sensor_data.get('Temp', 'N/A')
+        hum = st.session_state.sensor_data.get('Hum', 'N/A')
+        return f"Temperatura actual: {temp}°C, Humedad actual: {hum}%"
+    return "No hay datos disponibles del sensor. Por favor, obtén una lectura primero."
+
 # Clase para el template del prompt
 class CustomPromptTemplate(StringPromptTemplate):
     template: str
@@ -188,13 +197,18 @@ if os.path.exists(pdf_path):
         ),
         Tool(
             name="Analizar_Temperatura",
-            func=analyze_temperature,
-            description="Analiza si la temperatura es adecuada"
+            func=lambda x: analyze_temperature(st.session_state.sensor_data.get('Temp', 0)) if st.session_state.sensor_data else {"status": "Error", "recommendation": "No hay datos del sensor"},
+            description="Analiza la temperatura actual del ambiente"
         ),
         Tool(
             name="Analizar_Humedad",
-            func=analyze_humidity,
-            description="Analiza si la humedad es adecuada"
+            func=lambda x: analyze_humidity(st.session_state.sensor_data.get('Hum', 0)) if st.session_state.sensor_data else {"status": "Error", "recomendación": "No hay datos del sensor"},
+            description="Analiza la humedad actual del ambiente"
+        ),
+        Tool(
+            name="Consultar_Condiciones_Actuales",
+            func=lambda _: get_current_conditions(),
+            description="Obtiene las condiciones actuales de temperatura y humedad"
         )
     ]
     
@@ -203,6 +217,9 @@ if os.path.exists(pdf_path):
     
     Tienes acceso a las siguientes herramientas:
     {tools}
+    
+    IMPORTANTE: Antes de responder cualquier pregunta sobre condiciones ambientales, 
+    SIEMPRE usa primero la herramienta Consultar_Condiciones_Actuales para obtener los datos más recientes.
     
     Usa el siguiente formato:
     Pregunta: la pregunta que debes responder
@@ -213,8 +230,12 @@ if os.path.exists(pdf_path):
     ... (este patrón Pensamiento/Acción/Entrada/Observación puede repetirse N veces)
     Pensamiento: Ahora sé la respuesta final
     Acción Final: la respuesta final
-
-    Asegúrate de incluir información relevante sobre las condiciones ambientales actuales en tu respuesta.
+    
+    Asegúrate de:
+    1. Consultar siempre las condiciones actuales primero
+    2. Analizar si las condiciones son adecuadas usando las herramientas correspondientes
+    3. Buscar información específica sobre plantas en el documento
+    4. Proporcionar recomendaciones basadas en las condiciones actuales
     
     {agent_scratchpad}
     
@@ -277,44 +298,50 @@ with col1:
 with col2:
     st.subheader("Consulta al Asistente")
     st.info("""
+    Asegúrate de obtener una lectura del sensor antes de hacer preguntas.
+    
     Ejemplos de preguntas que puedes hacer:
-    - ¿Qué plantas son buenas para la temperatura actual?
-    - ¿Cómo afecta la humedad actual a las plantas?
-    - ¿Qué cuidados necesitan las plantas en estas condiciones?
+    - Considerando la temperatura y humedad actuales, ¿qué plantas me recomiendas?
+    - ¿Las condiciones actuales son buenas para plantas tropicales?
+    - ¿Qué ajustes necesito hacer en el ambiente para mejorar las condiciones de mis plantas?
+    - Según las condiciones actuales, ¿qué cuidados especiales necesitan mis plantas?
     """)
     
     user_question = st.text_area("¿Qué deseas saber?")
     
     if user_question and 'agent_executor' in locals():
-        with st.spinner('Procesando tu consulta...'):
-            try:
-                result = agent_executor(
-                    {
-                        'input': user_question,
-                        'agent_scratchpad': ''
-                    }
-                )
-                
-                response = result['output']
-                st.write("### Respuesta:")
-                st.write(response)
-                
-                if st.checkbox("Mostrar proceso de razonamiento"):
-                    st.write("### Proceso de razonamiento:")
-                    for step in result['intermediate_steps']:
-                        st.write(f"**Acción:** {step[0]}")
-                        st.write(f"**Resultado:** {step[1]}")
-                        st.write("---")
-                
-                if st.button("Escuchar"):
-                    result_audio, _ = text_to_speech(response, 'es-es')
-                    audio_file = open(f"temp/{result_audio}.mp3", "rb")
-                    audio_bytes = audio_file.read()
-                    st.audio(audio_bytes, format="audio/mp3", start_time=0)
+        if not st.session_state.sensor_data:
+            st.warning("Por favor, obtén primero una lectura del sensor usando el botón 'Obtener Lectura'")
+        else:
+            with st.spinner('Procesando tu consulta...'):
+                try:
+                    result = agent_executor(
+                        {
+                            'input': user_question,
+                            'agent_scratchpad': ''
+                        }
+                    )
                     
-            except Exception as e:
-                st.error(f"Error al procesar la consulta: {str(e)}")
-                st.error("Por favor, intenta reformular tu pregunta")
+                    response = result['output']
+                    st.write("### Respuesta:")
+                    st.write(response)
+                    
+                    if st.checkbox("Mostrar proceso de razonamiento"):
+                        st.write("### Proceso de razonamiento:")
+                        for step in result['intermediate_steps']:
+                            st.write(f"**Acción:** {step[0]}")
+                            st.write(f"**Resultado:** {step[1]}")
+                            st.write("---")
+                    
+                    if st.button("Escuchar"):
+                        result_audio, _ = text_to_speech(response, 'es-es')
+                        audio_file = open(f"temp/{result_audio}.mp3", "rb")
+                        audio_bytes = audio_file.read()
+                        st.audio(audio_bytes, format="audio/mp3", start_time=0)
+                        
+                except Exception as e:
+                    st.error(f"Error al procesar la consulta: {str(e)}")
+                    st.error("Por favor, intenta reformular tu pregunta")
 
 # Información en la barra lateral
 with st.sidebar:
@@ -322,7 +349,7 @@ with st.sidebar:
     st.write("""
     Este asistente puede:
     - Responder preguntas sobre plantas
-    - Analizar condiciones ambientales
+    - Analizar condiciones ambientales en tiempo real
     - Proporcionar recomendaciones personalizadas
     - Convertir respuestas a audio
     - Mostrar el proceso de razonamiento
