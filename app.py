@@ -38,7 +38,239 @@ if 'token_info' not in st.session_state:
 if 'intermediate_steps' not in st.session_state:
     st.session_state.intermediate_steps = None
 
-[... El resto del código hasta la sección de la interfaz permanece igual ...]
+# Clase para el template del prompt
+class CustomPromptTemplate(StringPromptTemplate):
+    template: str
+    tools: List[Tool]
+    
+    def format(self, **kwargs) -> str:
+        intermediate_steps = kwargs.get("intermediate_steps", [])
+        thoughts = ""
+        for action, observation in intermediate_steps:
+            thoughts += f"\nAcción: {action}\nObservación: {observation}\n"
+        
+        kwargs["agent_scratchpad"] = thoughts
+        kwargs["tools"] = "\n".join([f"{tool.name}: {tool.description}" for tool in self.tools])
+        kwargs["tool_names"] = ", ".join([tool.name for tool in self.tools])
+        
+        if "input" not in kwargs:
+            kwargs["input"] = ""
+            
+        return self.template.format(**kwargs)
+
+# Clase para procesar la salida del agente
+class CustomOutputParser(AgentOutputParser):
+    def parse(self, llm_output: str) -> Union[AgentAction, AgentFinish]:
+        if "Acción Final:" in llm_output:
+            return AgentFinish(
+                return_values={"output": llm_output.split("Acción Final:")[-1].strip()},
+                log=llm_output
+            )
+        
+        match = re.search(r"Acción:\s*(.*?)\nEntrada:\s*(.*)", llm_output, re.DOTALL)
+        if not match:
+            return AgentFinish(
+                return_values={"output": llm_output.strip()},
+                log=llm_output
+            )
+        
+        action = match.group(1).strip()
+        action_input = match.group(2).strip()
+        
+        return AgentAction(tool=action, tool_input=action_input.strip(" ").strip('"'), log=llm_output)
+        
+    @property
+    def _type(self) -> str:
+        return "custom_output_parser"
+
+def get_current_conditions() -> str:
+    """Obtiene las condiciones actuales del sensor."""
+    if 'sensor_data' in st.session_state and st.session_state.sensor_data:
+        temp = st.session_state.sensor_data.get('Temp', 'N/A')
+        hum = st.session_state.sensor_data.get('Hum', 'N/A')
+        return f"Temperatura actual: {temp}°C, Humedad actual: {hum}%"
+    return "No hay datos disponibles del sensor. Por favor, obtén una lectura primero."
+
+def get_mqtt_message():
+    message_received = {"received": False, "payload": None}
+    
+    def on_message(client, userdata, message):
+        try:
+            payload = json.loads(message.payload.decode())
+            message_received["payload"] = payload
+            message_received["received"] = True
+        except Exception as e:
+            st.error(f"Error al procesar mensaje: {e}")
+    
+    try:
+        client = mqtt.Client()
+        client.on_message = on_message
+        client.connect(MQTT_BROKER, MQTT_PORT, 60)
+        client.subscribe(MQTT_TOPIC)
+        client.loop_start()
+        
+        timeout = time.time() + 5
+        while not message_received["received"] and time.time() < timeout:
+            time.sleep(0.1)
+        
+        client.loop_stop()
+        client.disconnect()
+        
+        return message_received["payload"]
+    except Exception as e:
+        st.error(f"Error de conexión: {e}")
+        return None
+
+def analyze_temperature(temp: str) -> dict:
+    try:
+        temp = float(temp)
+        if temp < 18:
+            return {"status": "Frío", "recommendation": "Considere aumentar la temperatura"}
+        elif temp > 26:
+            return {"status": "Caliente", "recommendation": "Considere reducir la temperatura"}
+        return {"status": "Confortable", "recommendation": "Temperatura ideal"}
+    except:
+        return {"status": "Error", "recommendation": "No se pudo analizar la temperatura"}
+
+def analyze_humidity(humidity: str) -> dict:
+    try:
+        humidity = float(humidity)
+        if humidity < 30:
+            return {"status": "Baja", "recomendación": "Use un humidificador"}
+        elif humidity > 60:
+            return {"status": "Alta", "recomendación": "Use un deshumidificador"}
+        return {"status": "Óptima", "recomendación": "Nivel ideal"}
+    except:
+        return {"status": "Error", "recomendación": "No se pudo analizar la humedad"}
+
+def text_to_speech(text, tld):
+    tts = gTTS(text, "es", tld, slow=False)
+    try:
+        my_file_name = text[0:20]
+    except:
+        my_file_name = "audio"
+    tts.save(f"temp/{my_file_name}.mp3")
+    return my_file_name, text
+
+# Configuración de la página
+st.set_page_config(page_title="UMI - Asistente Inteligente", layout="wide")
+
+# Título y animación
+st.title('UMI - Asistente Inteligente 💬')
+
+try:
+    with open('umbird.json') as source:
+        animation = json.load(source)
+    st_lottie(animation, width=350)
+except Exception as e:
+    st.error(f"Error al cargar la animación: {e}")
+
+# Crear directorio temporal
+try:
+    os.mkdir("temp")
+except:
+    pass
+
+# Configuración de OpenAI
+os.environ['OPENAI_API_KEY'] = st.secrets["settings"]["key"]
+
+# Procesamiento del PDF
+pdf_path = 'plantas.pdf'
+if os.path.exists(pdf_path):
+    pdf_reader = PdfReader(pdf_path)
+    text = ""
+    for page in pdf_reader.pages:
+        text += page.extract_text()
+    
+    text_splitter = CharacterTextSplitter(
+        separator="\n",
+        chunk_size=500,
+        chunk_overlap=20,
+        length_function=len
+    )
+    chunks = text_splitter.split_text(text)
+    
+    embeddings = OpenAIEmbeddings()
+    knowledge_base = FAISS.from_texts(chunks, embeddings)
+    
+    # Herramientas del agente
+    tools = [
+        Tool(
+            name="Consultar_Documento",
+            func=lambda q: knowledge_base.similarity_search(q)[0].page_content,
+            description="Útil para buscar información en el documento sobre plantas"
+        ),
+        Tool(
+            name="Analizar_Temperatura",
+            func=lambda x: analyze_temperature(st.session_state.sensor_data.get('Temp', 0)) if st.session_state.sensor_data else {"status": "Error", "recommendation": "No hay datos del sensor"},
+            description="Analiza la temperatura actual del ambiente"
+        ),
+        Tool(
+            name="Analizar_Humedad",
+            func=lambda x: analyze_humidity(st.session_state.sensor_data.get('Hum', 0)) if st.session_state.sensor_data else {"status": "Error", "recomendación": "No hay datos del sensor"},
+            description="Analiza la humedad actual del ambiente"
+        ),
+        Tool(
+            name="Consultar_Condiciones_Actuales",
+            func=lambda _: get_current_conditions(),
+            description="Obtiene las condiciones actuales de temperatura y humedad"
+        )
+    ]
+    
+    # Template para el prompt
+    template = """Eres un asistente experto en plantas y condiciones ambientales.
+    
+    Tienes acceso a las siguientes herramientas:
+    {tools}
+    
+    IMPORTANTE: Antes de responder cualquier pregunta sobre condiciones ambientales, 
+    SIEMPRE usa primero la herramienta Consultar_Condiciones_Actuales para obtener los datos más recientes.
+    
+    Usa el siguiente formato:
+    Pregunta: la pregunta que debes responder
+    Pensamiento: piensa paso a paso qué debes hacer
+    Acción: la acción a tomar (una de {tool_names})
+    Entrada: la entrada para la herramienta
+    Observación: el resultado de la acción
+    ... (este patrón Pensamiento/Acción/Entrada/Observación puede repetirse N veces)
+    Pensamiento: Ahora sé la respuesta final
+    Acción Final: la respuesta final
+    
+    Asegúrate de:
+    1. Consultar siempre las condiciones actuales primero
+    2. Analizar si las condiciones son adecuadas usando las herramientas correspondientes
+    3. Buscar información específica sobre plantas en el documento
+    4. Proporcionar recomendaciones basadas en las condiciones actuales
+    
+    {agent_scratchpad}
+    
+    Pregunta: {input}
+    Pensamiento:"""
+
+    prompt = CustomPromptTemplate(
+        template=template,
+        tools=tools,
+        input_variables=["input", "intermediate_steps", "agent_scratchpad"]
+    )
+    
+    output_parser = CustomOutputParser()
+    llm = OpenAI(temperature=0, model_name="gpt-4o-mini")
+    llm_chain = LLMChain(llm=llm, prompt=prompt)
+    
+    agent = LLMSingleActionAgent(
+        llm_chain=llm_chain,
+        output_parser=output_parser,
+        stop=["\nObservación:"],
+        allowed_tools=[tool.name for tool in tools],
+        input_keys=["input", "agent_scratchpad"]
+    )
+    
+    agent_executor = AgentExecutor.from_agent_and_tools(
+        agent=agent,
+        tools=tools,
+        verbose=True,
+        return_intermediate_steps=True
+    )
 
 # Interfaz principal
 col1, col2 = st.columns([1, 2])
