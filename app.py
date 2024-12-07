@@ -11,6 +11,7 @@ from langchain.agents import Tool, AgentExecutor, LLMSingleActionAgent, AgentOut
 from langchain.prompts import StringPromptTemplate
 from langchain.schema import AgentAction, AgentFinish
 from langchain.chains import LLMChain
+from typing import List, Union, Optional, Any, Sequence, Tuple
 import PyPDF2
 from PIL import Image as Image, ImageOps as ImagOps
 import glob
@@ -20,7 +21,6 @@ from streamlit_lottie import st_lottie
 import json
 import paho.mqtt.client as mqtt
 import pytz
-from typing import List, Union, Optional
 import re
 
 # Configuración MQTT
@@ -261,17 +261,17 @@ if os.path.exists(pdf_path):
         llm_chain=llm_chain,
         output_parser=output_parser,
         stop=["\nObservación:"],
-        allowed_tools=[tool.name for tool in tools],
-        input_keys=["input", "agent_scratchpad"]
+        allowed_tools=[tool.name for tool in tools]
     )
     
-    # Corrección en la configuración del AgentExecutor
-    agent_executor = AgentExecutor.from_agent_and_tools(
+    # Configuración actualizada del AgentExecutor
+    agent_executor = AgentExecutor(
         agent=agent,
         tools=tools,
+        max_iterations=10,
+        early_stopping_method="generate",
         handle_parsing_errors=True,
-        return_intermediate_steps=True,
-        max_iterations=10
+        return_intermediate_steps=True
     )
 
 # Interfaz principal
@@ -319,7 +319,6 @@ with col2:
         if not st.session_state.sensor_data:
             st.warning("Por favor, obtén primero una lectura del sensor usando el botón 'Obtener Lectura'")
         else:
-            # Botón específico para realizar la consulta
             if st.button("Consultar"):
                 with st.spinner('Procesando tu consulta...'):
                     try:
@@ -327,14 +326,12 @@ with col2:
                             result = agent_executor(
                                 {
                                     'input': user_question,
-                                    'agent_scratchpad': ''
                                 }
                             )
                             
                             st.session_state.last_response = result['output']
                             st.session_state.intermediate_steps = result['intermediate_steps']
                             
-                            # Guardar información de tokens
                             st.session_state.token_info = {
                                 'total_tokens': cb.total_tokens,
                                 'prompt_tokens': cb.prompt_tokens,
@@ -351,9 +348,11 @@ with col2:
         st.write("### Respuesta:")
         st.write(st.session_state.last_response)
         
-        # Mostrar información de tokens
         if st.session_state.token_info:
             st.write("### Información de uso:")
+            st.write(f"Total de Tokens: {st.session_state.token_info['total_tokens']}")
+            st.write(f"Tokens de Prompt: {st.session_state.token_info['prompt_tokens']}")
+            st.write(f"Tokens de Completion: {st.session_state.token_info['completion_tokens']}")
             st.write(f"Total de Tokens: {st.session_state.token_info['total_tokens']}")
             st.write(f"Tokens de Prompt: {st.session_state.token_info['prompt_tokens']}")
             st.write(f"Tokens de Completion: {st.session_state.token_info['completion_tokens']}")
