@@ -77,7 +77,6 @@ class CustomOutputParser(AgentOutputParser):
     def _type(self) -> str:
         return "custom_output_parser"
 
-# Funciones de utilidad
 def get_mqtt_message():
     message_received = {"received": False, "payload": None}
     
@@ -146,7 +145,7 @@ st.set_page_config(page_title="UMI - Asistente Inteligente", layout="wide")
 st.title('UMI - Asistente Inteligente 💬')
 
 try:
-    with open('umbirdp.json') as source:
+    with open('umbird.json') as source:
         animation = json.load(source)
     st_lottie(animation, width=350)
 except Exception as e:
@@ -161,7 +160,7 @@ except:
 # Configuración de OpenAI
 os.environ['OPENAI_API_KEY'] = st.secrets["settings"]["key"]
 
-# Procesamiento del PDF y configuración del agente
+# Procesamiento del PDF
 pdf_path = 'plantas.pdf'
 if os.path.exists(pdf_path):
     pdf_reader = PdfReader(pdf_path)
@@ -229,7 +228,7 @@ if os.path.exists(pdf_path):
     )
     
     output_parser = CustomOutputParser()
-    llm = OpenAI(temperature=0)
+    llm = OpenAI(temperature=0, model_name="gpt-4o-mini")
     llm_chain = LLMChain(llm=llm, prompt=prompt)
     
     agent = LLMSingleActionAgent(
@@ -300,7 +299,6 @@ with col2:
                 st.write("### Respuesta:")
                 st.write(response)
                 
-                # Mostrar pasos intermedios
                 if st.checkbox("Mostrar proceso de razonamiento"):
                     st.write("### Proceso de razonamiento:")
                     for step in result['intermediate_steps']:
