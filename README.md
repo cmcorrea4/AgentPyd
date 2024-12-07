@@ -48,7 +48,7 @@ pytz
 
 1. Clonar el repositorio:
 ```bash
-git clone https://github.com/tu-usuario/umi-assistant.git
+git clone https://github.com/cmcorrea4/umi-assistant.git
 cd umi-assistant
 ```
 
