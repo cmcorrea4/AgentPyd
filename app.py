@@ -210,7 +210,7 @@ os.environ['OPENAI_API_KEY'] = st.secrets["settings"]["key"]
 st.title("🤖 UMI - Asistente Inteligente")
 
 # Cargar animación
-with open('umbird.json') as source:
+with open('umbirdp.json') as source:
     animation = json.load(source)
 st_lottie(animation, width=350)
 
