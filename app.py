@@ -1,13 +1,14 @@
-import streamlit as st
 import os
+import streamlit as st
 from pydantic import BaseModel, Field
 from typing import List, Optional, Dict, Any
 from PyPDF2 import PdfReader
-from langchain.text_splitter import CharacterTextSplitter
+from langchain_text_splitters import CharacterTextSplitter
 from langchain_openai import OpenAIEmbeddings, OpenAI
 from langchain_community.vectorstores import FAISS
-from langchain.chains import load_qa_chain
-from langchain.callbacks import get_openai_callback
+from langchain_core.prompts import PromptTemplate
+from langchain_core.output_parsers import StrOutputParser
+from langchain_core.runnables import RunnablePassthrough
 import json
 import paho.mqtt.client as mqtt
 import time
@@ -76,77 +77,7 @@ class HumidityAnalysisTool(Tool):
             "comfort_index": min(100, max(0, (humidity - 30) * 100 / 30))
         }
 
-class RAGTool(Tool):
-    name: str = "rag_query"
-    description: str = "Consulta documentos usando RAG"
-    
-    def execute(self, **kwargs) -> Dict[str, Any]:
-        knowledge_base = kwargs.get('knowledge_base')
-        question = kwargs.get('question')
-        sensor_data = kwargs.get('sensor_data', {})
-        
-        if not knowledge_base or not question:
-            return {"error": "Falta la base de conocimiento o la pregunta"}
-        
-        # Enriquecer la pregunta con datos del sensor
-        if sensor_data:
-            enhanced_question = f"""
-            Contexto actual del sensor:
-            - Temperatura: {sensor_data.get('Temp', 'N/A')}°C
-            - Humedad: {sensor_data.get('Hum', 'N/A')}%
-            
-            Pregunta del usuario:
-            {question}
-            """
-        else:
-            enhanced_question = question
-            
-        docs = knowledge_base.similarity_search(enhanced_question)
-        llm = OpenAI()
-        chain = load_qa_chain(llm, chain_type="stuff")
-        
-        with get_openai_callback() as cb:
-            response = chain.run(input_documents=docs, question=enhanced_question)
-            usage = str(cb)
-        
-        return {
-            "response": response,
-            "usage": usage
-        }
-
-class SmartAgent(BaseModel):
-    name: str
-    description: str
-    tools: Dict[str, Tool] = {}
-    history: List[Dict[str, Any]] = []
-    knowledge_base: Optional[Any] = None
-    sensor_data: Optional[Dict[str, Any]] = None
-    
-    def add_tool(self, tool: Tool):
-        self.tools[tool.name] = tool
-    
-    def use_tool(self, tool_name: str, **kwargs) -> Dict[str, Any]:
-        if tool_name not in self.tools:
-            return {"error": "Herramienta no encontrada"}
-        
-        result = self.tools[tool_name].execute(**kwargs)
-        
-        operation = {
-            "tool": tool_name,
-            "inputs": kwargs,
-            "result": result
-        }
-        self.history.append(operation)
-        
-        return result
-    
-    def set_knowledge_base(self, kb):
-        self.knowledge_base = kb
-        
-    def set_sensor_data(self, data):
-        self.sensor_data = data
-
-# Funciones auxiliares
+# Funciones MQTT
 def get_mqtt_message():
     """Función para obtener un único mensaje MQTT"""
     message_received = {"received": False, "payload": None}
@@ -179,6 +110,7 @@ def get_mqtt_message():
         st.error(f"Error de conexión: {e}")
         return None
 
+# Función de texto a voz
 def text_to_speech(text, tld):
     tts = gTTS(text, "es", tld, slow=False)
     try:
@@ -191,17 +123,6 @@ def text_to_speech(text, tld):
 # Configuración de la página
 st.set_page_config(page_title="UMI - Asistente Inteligente", layout="wide")
 
-# Inicialización del agente
-if 'agent' not in st.session_state:
-    agent = SmartAgent(
-        name="UMI",
-        description="Asistente inteligente para análisis de datos y consultas"
-    )
-    agent.add_tool(TemperatureAnalysisTool())
-    agent.add_tool(HumidityAnalysisTool())
-    agent.add_tool(RAGTool())
-    st.session_state.agent = agent
-
 # Configuración de OpenAI
 os.environ['OPENAI_API_KEY'] = st.secrets["settings"]["key"]
 
@@ -209,34 +130,57 @@ os.environ['OPENAI_API_KEY'] = st.secrets["settings"]["key"]
 st.title("🤖 UMI - Asistente Inteligente")
 
 # Cargar animación
-with open('umbirdp.json') as source:
+with open('umbird.json') as source:
     animation = json.load(source)
 st_lottie(animation, width=350)
 
-# Crear directorio temporal si no existe
+# Crear directorio temporal
 try:
     os.mkdir("temp")
 except:
     pass
 
-# Cargar y procesar PDF
-pdfFileObj = open('plantas.pdf', 'rb')
-pdf_reader = PdfReader(pdfFileObj)
-text = ""
-for page in pdf_reader.pages:
-    text += page.extract_text()
+# Inicialización de herramientas
+temp_tool = TemperatureAnalysisTool()
+humidity_tool = HumidityAnalysisTool()
 
-# Crear base de conocimiento
-text_splitter = CharacterTextSplitter(
-    separator="\n",
-    chunk_size=500,
-    chunk_overlap=20,
-    length_function=len
-)
-chunks = text_splitter.split_text(text)
-embeddings = OpenAIEmbeddings()
-knowledge_base = FAISS.from_texts(chunks, embeddings)
-st.session_state.agent.set_knowledge_base(knowledge_base)
+# Procesar PDF
+pdf_path = 'plantas.pdf'
+if os.path.exists(pdf_path):
+    pdf_reader = PdfReader(pdf_path)
+    text = ""
+    for page in pdf_reader.pages:
+        text += page.extract_text()
+        
+    # Crear embeddings y base de conocimiento
+    text_splitter = CharacterTextSplitter(
+        separator="\n",
+        chunk_size=500,
+        chunk_overlap=20,
+        length_function=len
+    )
+    chunks = text_splitter.split_text(text)
+    
+    # Inicializar embeddings y vectorstore
+    embeddings = OpenAIEmbeddings()
+    vectorstore = FAISS.from_texts(chunks, embeddings)
+    
+    # Crear cadena de RAG
+    template = """Pregunta: {question}
+    Contexto: {context}
+    Respuesta útil:"""
+    
+    prompt = PromptTemplate.from_template(template)
+    
+    retriever = vectorstore.as_retriever()
+    llm = OpenAI(temperature=0)
+    
+    rag_chain = (
+        {"context": retriever, "question": RunnablePassthrough()}
+        | prompt
+        | llm
+        | StrOutputParser()
+    )
 
 # Layout principal
 col1, col2 = st.columns([1, 2])
@@ -247,19 +191,17 @@ with col1:
         with st.spinner('Obteniendo datos del sensor...'):
             sensor_data = get_mqtt_message()
             if sensor_data:
-                st.session_state.agent.set_sensor_data(sensor_data)
                 st.success("Datos recibidos")
                 st.metric("Temperatura", f"{sensor_data.get('Temp', 'N/A')}°C")
                 st.metric("Humedad", f"{sensor_data.get('Hum', 'N/A')}%")
                 
-                # Análisis automático
-                temp_analysis = st.session_state.agent.use_tool(
-                    "analyze_temperature",
+                # Análisis de temperatura
+                temp_analysis = temp_tool.execute(
                     temperature=float(sensor_data['Temp']),
                     operation='comfort'
                 )
-                hum_analysis = st.session_state.agent.use_tool(
-                    "analyze_humidity",
+                # Análisis de humedad
+                hum_analysis = humidity_tool.execute(
                     humidity=float(sensor_data['Hum'])
                 )
                 
@@ -278,33 +220,16 @@ with col2:
     st.subheader("Realiza tu consulta")
     user_question = st.text_area("Escribe tu pregunta aquí:")
     
-    if user_question:
+    if user_question and 'rag_chain' in locals():
         with st.spinner('Analizando tu pregunta...'):
-            result = st.session_state.agent.use_tool(
-                "rag_query",
-                knowledge_base=knowledge_base,
-                question=user_question,
-                sensor_data=st.session_state.agent.sensor_data
-            )
+            response = rag_chain.invoke(user_question)
             
             st.write("### Respuesta:")
-            st.write(result["response"])
+            st.write(response)
             
             # Botón de audio
             if st.button("Escuchar"):
-                result_audio, _ = text_to_speech(result["response"], 'es-es')
+                result_audio, _ = text_to_speech(response, 'es-es')
                 audio_file = open(f"temp/{result_audio}.mp3", "rb")
                 audio_bytes = audio_file.read()
                 st.audio(audio_bytes, format="audio/mp3", start_time=0)
-
-# Historial
-if st.checkbox("Mostrar historial de operaciones"):
-    st.write("### Historial")
-    for operation in st.session_state.agent.history:
-        st.write(f"Operación: {operation['tool']}")
-        st.write(f"Resultado: {operation['result']}")
-        st.write("---")
-
-# Cerrar archivo PDF
-pdfFileObj.close()
-
