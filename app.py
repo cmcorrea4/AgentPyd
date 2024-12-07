@@ -7,7 +7,7 @@ from langchain.vectorstores import FAISS
 from langchain.chains.question_answering import load_qa_chain
 from langchain.llms import OpenAI
 from langchain.callbacks import get_openai_callback
-from langchain.agents import Tool, AgentExecutor, LLMSingleActionAgent, AgentOutputParser
+from langchain.agents import Tool, AgentExecutor, LLMSingleActionAgent
 from langchain.prompts import StringPromptTemplate
 from langchain.schema import AgentAction, AgentFinish
 from langchain.chains import LLMChain
@@ -28,13 +28,17 @@ MQTT_BROKER = "157.230.214.127"
 MQTT_PORT = 1883
 MQTT_TOPIC = "sensor_st"
 
-# Clase personalizada para el prompt del agente
+# Variables de estado para los datos del sensor
+if 'sensor_data' not in st.session_state:
+    st.session_state.sensor_data = None
+
+# Clase para el template del prompt
 class CustomPromptTemplate(StringPromptTemplate):
     template: str
     tools: List[Tool]
     
     def format(self, **kwargs) -> str:
-        intermediate_steps = kwargs.pop("intermediate_steps")
+        intermediate_steps = kwargs.get("intermediate_steps", [])
         thoughts = ""
         for action, observation in intermediate_steps:
             thoughts += f"\nAcción: {action}\nObservación: {observation}\n"
@@ -42,30 +46,34 @@ class CustomPromptTemplate(StringPromptTemplate):
         kwargs["agent_scratchpad"] = thoughts
         kwargs["tools"] = "\n".join([f"{tool.name}: {tool.description}" for tool in self.tools])
         kwargs["tool_names"] = ", ".join([tool.name for tool in self.tools])
+        
+        if "input" not in kwargs:
+            kwargs["input"] = ""
+            
         return self.template.format(**kwargs)
 
 # Clase para procesar la salida del agente
-class CustomOutputParser(AgentOutputParser):
-    def parse(self, llm_output: str) -> Union[AgentAction, AgentFinish]:
-        if "Acción Final:" in llm_output:
+class CustomOutputParser:
+    def parse(self, text: str) -> Union[AgentAction, AgentFinish]:
+        if "Acción Final:" in text:
             return AgentFinish(
-                return_values={"output": llm_output.split("Acción Final:")[-1].strip()},
-                log=llm_output,
+                return_values={"output": text.split("Acción Final:")[-1].strip()},
+                log=text
             )
-        
-        match = re.search(r"Acción:\s*(.*?)\nEntrada:\s*(.*)", llm_output, re.DOTALL)
+            
+        match = re.search(r"Acción:\s*(.*?)\nEntrada:\s*(.*)", text, re.DOTALL)
         if not match:
             return AgentFinish(
-                return_values={"output": llm_output.strip()},
-                log=llm_output,
+                return_values={"output": text.strip()},
+                log=text
             )
-        
+            
         action = match.group(1).strip()
         action_input = match.group(2).strip()
         
-        return AgentAction(tool=action, tool_input=action_input.strip(" ").strip('"'), log=llm_output)
+        return AgentAction(tool=action, tool_input=action_input.strip(" ").strip('"'), log=text)
 
-# Funciones MQTT
+# Funciones de utilidad
 def get_mqtt_message():
     message_received = {"received": False, "payload": None}
     
@@ -97,6 +105,7 @@ def get_mqtt_message():
         return None
 
 def analyze_temperature(temp: float) -> dict:
+    temp = float(temp)
     if temp < 18:
         return {"status": "Frío", "recommendation": "Considere aumentar la temperatura"}
     elif temp > 26:
@@ -104,6 +113,7 @@ def analyze_temperature(temp: float) -> dict:
     return {"status": "Confortable", "recommendation": "Temperatura ideal"}
 
 def analyze_humidity(humidity: float) -> dict:
+    humidity = float(humidity)
     if humidity < 30:
         return {"status": "Baja", "recomendación": "Use un humidificador"}
     elif humidity > 60:
@@ -124,12 +134,9 @@ st.set_page_config(page_title="UMI - Asistente Inteligente", layout="wide")
 
 # Título y animación
 st.title('UMI - Asistente Inteligente 💬')
-with open('umbirdp.json') as source:
+with open('umbird.json') as source:
     animation = json.load(source)
 st_lottie(animation, width=350)
-
-# Configuración de OpenAI
-os.environ['OPENAI_API_KEY'] = st.secrets["settings"]["key"]
 
 # Crear directorio temporal
 try:
@@ -137,7 +144,10 @@ try:
 except:
     pass
 
-# Procesar PDF y crear base de conocimiento
+# Configuración de OpenAI
+os.environ['OPENAI_API_KEY'] = st.secrets["settings"]["key"]
+
+# Procesamiento del PDF y configuración del agente
 pdf_path = 'plantas.pdf'
 if os.path.exists(pdf_path):
     pdf_reader = PdfReader(pdf_path)
@@ -156,7 +166,7 @@ if os.path.exists(pdf_path):
     embeddings = OpenAIEmbeddings()
     knowledge_base = FAISS.from_texts(chunks, embeddings)
     
-    # Definir herramientas del agente
+    # Herramientas del agente
     tools = [
         Tool(
             name="Consultar_Documento",
@@ -175,7 +185,7 @@ if os.path.exists(pdf_path):
         )
     ]
     
-    # Template para el prompt del agente
+    # Template para el prompt
     template = """Eres un asistente experto en plantas y condiciones ambientales.
     
     Tienes acceso a las siguientes herramientas:
@@ -191,14 +201,13 @@ if os.path.exists(pdf_path):
     Pensamiento: Ahora sé la respuesta final
     Acción Final: la respuesta final
 
-    Comienza!
+    Asegúrate de incluir información relevante sobre las condiciones ambientales actuales en tu respuesta.
     
     {agent_scratchpad}
     
     Pregunta: {input}
     Pensamiento:"""
 
-    # Configurar el agente
     prompt = CustomPromptTemplate(
         template=template,
         tools=tools,
@@ -213,13 +222,15 @@ if os.path.exists(pdf_path):
         llm_chain=llm_chain,
         output_parser=output_parser,
         stop=["\nObservación:"],
-        allowed_tools=[tool.name for tool in tools]
+        allowed_tools=[tool.name for tool in tools],
+        input_keys=["input", "agent_scratchpad"]
     )
     
     agent_executor = AgentExecutor.from_agent_and_tools(
         agent=agent,
         tools=tools,
-        verbose=True
+        verbose=True,
+        return_intermediate_steps=True
     )
 
 # Interfaz principal
@@ -252,12 +263,23 @@ with col1:
 
 with col2:
     st.subheader("Consulta al Asistente")
+    st.info("""
+    Ejemplos de preguntas que puedes hacer:
+    - ¿Qué plantas son buenas para la temperatura actual?
+    - ¿Cómo afecta la humedad actual a las plantas?
+    - ¿Qué cuidados necesitan las plantas en estas condiciones?
+    """)
+    
     user_question = st.text_area("¿Qué deseas saber?")
     
     if user_question and 'agent_executor' in locals():
         with st.spinner('Procesando tu consulta...'):
             try:
-                response = agent_executor.run(user_question)
+                response = agent_executor.run({
+                    'input': user_question,
+                    'agent_scratchpad': ''
+                })
+                
                 st.write("### Respuesta:")
                 st.write(response)
                 
@@ -270,13 +292,15 @@ with col2:
             except Exception as e:
                 st.error(f"Error al procesar la consulta: {str(e)}")
 
-# Información adicional
+# Información en la barra lateral
 with st.sidebar:
     st.subheader("Acerca del Asistente")
     st.write("""
     Este asistente puede:
     - Responder preguntas sobre plantas
     - Analizar condiciones ambientales
-    - Proporcionar recomendaciones
+    - Proporcionar recomendaciones personalizadas
     - Convertir respuestas a audio
+    
+    Basado en los datos del sensor y la información del documento.
     """)
