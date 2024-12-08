@@ -1,15 +1,20 @@
 import os
 import streamlit as st
-from PyPDF2 import PdfReader
 from langchain.text_splitter import CharacterTextSplitter
 from langchain.vectorstores import FAISS
+from langchain.chains.question_answering import load_qa_chain
+from langchain.callbacks import get_openai_callback
+from langchain.agents import Tool, AgentExecutor, LLMSingleActionAgent, AgentOutputParser
+from langchain.prompts import StringPromptTemplate
+from langchain.schema import AgentAction, AgentFinish
 from langchain.chains import LLMChain
 from langchain_anthropic import ChatAnthropic
-import numpy as np
-from typing import List, Union
+import paho.mqtt.client as mqtt
 import json
 import time
-import paho.mqtt.client as mqtt
+from typing import List, Union
+import re
+from PIL import Image
 from gtts import gTTS
 
 # Configuración MQTT
@@ -22,80 +27,47 @@ if 'sensor_data' not in st.session_state:
     st.session_state.sensor_data = None
 if 'last_response' not in st.session_state:
     st.session_state.last_response = None
-if 'document_chunks' not in st.session_state:
-    st.session_state.document_chunks = None
 
-class ClaudeEmbeddings:
-    def __init__(self, model="claude-3-5-sonnet-20241022"):
-        self.claude = ChatAnthropic(model=model)
+class CustomPromptTemplate(StringPromptTemplate):
+    template: str
+    tools: List[Tool]
     
-    def embed_text(self, text: str) -> List[float]:
-        """Genera un embedding usando Claude"""
-        prompt = f"""Por favor, analiza el siguiente texto y genera un vector de embedding de 1536 dimensiones. 
-        El vector debe capturar la esencia semántica del texto. Responde SOLO con los números del vector, 
-        separados por comas.
+    def format(self, **kwargs) -> str:
+        intermediate_steps = kwargs.get("intermediate_steps", [])
+        thoughts = ""
+        for action, observation in intermediate_steps:
+            thoughts += f"\nAcción: {action}\nObservación: {observation}\n"
         
-        Texto: {text}
-        """
+        kwargs["agent_scratchpad"] = thoughts
+        kwargs["tools"] = "\n".join([f"{tool.name}: {tool.description}" for tool in self.tools])
+        kwargs["tool_names"] = ", ".join([tool.name for tool in self.tools])
         
-        try:
-            response = self.claude.invoke(prompt)
-            # Limpiar y convertir la respuesta a una lista de números
-            vector_str = response.content.strip().replace('[', '').replace(']', '')
-            vector = [float(x) for x in vector_str.split(',')]
-            # Normalizar el vector
-            vector = np.array(vector)
-            vector = vector / np.linalg.norm(vector)
-            return vector.tolist()
-        except Exception as e:
-            st.error(f"Error al generar embedding: {e}")
-            # Retornar un vector de ceros como fallback
-            return [0.0] * 1536
+        if "input" not in kwargs:
+            kwargs["input"] = ""
+            
+        return self.template.format(**kwargs)
 
-    def embed_documents(self, texts: List[str]) -> List[List[float]]:
-        """Genera embeddings para una lista de textos"""
-        return [self.embed_text(text) for text in texts]
-
-def process_pdf(pdf_path: str) -> List[str]:
-    """Procesa el PDF y retorna chunks de texto"""
-    try:
-        pdf_reader = PdfReader(pdf_path)
-        text = ""
-        for page in pdf_reader.pages:
-            text += page.extract_text()
-
-        text_splitter = CharacterTextSplitter(
-            separator="\n",
-            chunk_size=500,
-            chunk_overlap=20,
-            length_function=len
-        )
-        chunks = text_splitter.split_text(text)
-        st.session_state.document_chunks = chunks
-        return chunks
-    except Exception as e:
-        st.error(f"Error al procesar PDF: {e}")
-        return []
-
-def semantic_search(query: str, chunks: List[str], top_k: int = 3) -> List[str]:
-    """Realiza búsqueda semántica usando Claude"""
-    embeddings = ClaudeEmbeddings()
-    query_embedding = embeddings.embed_text(query)
-    
-    chunk_embeddings = embeddings.embed_documents(chunks)
-    
-    # Calcular similitud coseno
-    similarities = []
-    for chunk_emb in chunk_embeddings:
-        similarity = np.dot(query_embedding, chunk_emb)
-        similarities.append(similarity)
-    
-    # Obtener los top_k chunks más relevantes
-    top_indices = np.argsort(similarities)[-top_k:][::-1]
-    return [chunks[i] for i in top_indices]
+class CustomOutputParser(AgentOutputParser):
+    def parse(self, llm_output: str) -> Union[AgentAction, AgentFinish]:
+        if "Acción Final:" in llm_output:
+            return AgentFinish(
+                return_values={"output": llm_output.split("Acción Final:")[-1].strip()},
+                log=llm_output
+            )
+        
+        match = re.search(r"Acción:\s*(.*?)\nEntrada:\s*(.*)", llm_output, re.DOTALL)
+        if not match:
+            return AgentFinish(
+                return_values={"output": llm_output.strip()},
+                log=llm_output
+            )
+        
+        action = match.group(1).strip()
+        action_input = match.group(2).strip()
+        
+        return AgentAction(tool=action, tool_input=action_input.strip(" ").strip('"'), log=llm_output)
 
 def get_mqtt_message():
-    """Obtiene datos del sensor MQTT"""
     message_received = {"received": False, "payload": None}
     
     def on_message(client, userdata, message):
@@ -125,54 +97,39 @@ def get_mqtt_message():
         st.error(f"Error de conexión: {e}")
         return None
 
-def analyze_with_claude(query: str, context: List[str], sensor_data: dict = None) -> str:
-    """Analiza la consulta usando Claude con contexto y datos del sensor"""
+def analyze_data(data: dict) -> dict:
+    """Analiza los datos proporcionados usando Claude"""
     llm = ChatAnthropic(model='claude-3-5-sonnet-20241022')
-    
-    prompt = f"""Analiza la siguiente consulta usando el contexto proporcionado y los datos del sensor.
-    
-    Consulta: {query}
-    
-    Contexto relevante del documento:
-    {' '.join(context)}
-    
-    Datos del sensor: {sensor_data if sensor_data else 'No disponibles'}
-    
-    Por favor:
-    1. Proporciona un análisis detallado
-    2. Relaciona la información del documento con los datos del sensor cuando sea relevante
-    3. Ofrece recomendaciones específicas
-    4. Destaca cualquier patrón o anomalía importante
-    """
-    
-    response = llm.invoke(prompt)
-    return response.content
+    response = llm.invoke(
+        f"""Analiza los siguientes datos y proporciona insights relevantes: {data}
+        Por favor incluye:
+        1. Patrones principales
+        2. Anomalías
+        3. Recomendaciones
+        """
+    )
+    return response
 
-def text_to_speech(text: str, tld: str = 'es-es') -> tuple:
-    """Convierte texto a voz"""
+def text_to_speech(text, tld='es-es'):
     tts = gTTS(text=text, lang='es', tld=tld, slow=False)
-    file_name = text[:20]
-    file_path = f"temp/{file_name}.mp3"
-    tts.save(file_path)
-    return file_name, text
+    try:
+        my_file_name = text[0:20]
+    except:
+        my_file_name = "audio"
+    tts.save(f"temp/{my_file_name}.mp3")
+    return my_file_name, text
 
 # Configuración de la página
-st.set_page_config(page_title="Asistente Claude", layout="wide")
-st.title('Asistente Inteligente con Claude 🤖')
+st.set_page_config(page_title="Asistente de Análisis con Claude", layout="wide")
+st.title('Asistente de Análisis con Claude 🤖')
 
-# Crear directorio temporal
+# Crear directorio temporal si no existe
 os.makedirs("temp", exist_ok=True)
 
-# Input para API key
+# Input para la API key de Anthropic
 api_key = st.text_input('Ingresa tu API Key de Anthropic:', type='password')
 if api_key:
     os.environ['ANTHROPIC_API_KEY'] = api_key
-
-# Procesamiento inicial del PDF
-pdf_path = 'plantas.pdf'
-if os.path.exists(pdf_path) and st.session_state.document_chunks is None:
-    with st.spinner('Procesando documento base...'):
-        st.session_state.document_chunks = process_pdf(pdf_path)
 
 # Interfaz principal
 col1, col2 = st.columns([1, 2])
@@ -188,42 +145,54 @@ with col1:
                 
                 for key, value in sensor_data.items():
                     st.metric(key, value)
+                
+                # Análisis automático con Claude
+                analysis = analyze_data(sensor_data)
+                st.write("### Análisis")
+                st.write(analysis)
             else:
                 st.warning("No se recibieron datos del sensor")
 
 with col2:
     st.subheader("Consulta al Asistente")
     st.info("""
+    Asegúrate de:
+    1. Ingresar tu API Key de Anthropic
+    2. Obtener una lectura del sensor antes de hacer preguntas
+    
     Puedes preguntar sobre:
-    - Información del documento base
-    - Datos del sensor
-    - Recomendaciones basadas en las condiciones actuales
+    - Análisis de patrones en los datos
+    - Recomendaciones basadas en las lecturas
+    - Comparaciones con valores óptimos
     """)
     
-    user_question = st.text_area("¿Qué deseas saber?")
+    user_question = st.text_area("¿Qué deseas analizar?")
     
     if user_question and api_key:
-        with st.spinner('Analizando tu consulta...'):
-            try:
-                # Buscar contexto relevante
-                relevant_chunks = []
-                if st.session_state.document_chunks:
-                    relevant_chunks = semantic_search(user_question, st.session_state.document_chunks)
-                
-                # Obtener respuesta
-                response = analyze_with_claude(
-                    user_question, 
-                    relevant_chunks, 
-                    st.session_state.sensor_data
-                )
-                
-                st.session_state.last_response = response
-                
-                st.write("### Respuesta:")
-                st.write(response)
-                
-            except Exception as e:
-                st.error(f"Error al procesar la consulta: {str(e)}")
+        if not st.session_state.sensor_data:
+            st.warning("Por favor, obtén primero una lectura del sensor")
+        else:
+            with st.spinner('Analizando tu consulta...'):
+                try:
+                    llm = ChatAnthropic(model='claude-3-5-sonnet-20241022')
+                    response = llm.invoke(
+                        f"""Analiza la siguiente pregunta sobre estos datos: {st.session_state.sensor_data}
+                        Pregunta: {user_question}
+                        
+                        Por favor:
+                        1. Proporciona un análisis detallado
+                        2. Incluye recomendaciones específicas
+                        3. Destaca cualquier patrón o anomalía relevante
+                        """
+                    )
+                    
+                    st.session_state.last_response = response
+                    
+                    st.write("### Respuesta:")
+                    st.write(response)
+                    
+                except Exception as e:
+                    st.error(f"Error al procesar la consulta: {str(e)}")
 
     # Botón de audio
     if st.session_state.last_response:
@@ -240,12 +209,12 @@ with col2:
 with st.sidebar:
     st.subheader("Acerca del Asistente")
     st.write("""
-    Este asistente utiliza exclusivamente Claude para:
-    - Procesar y entender documentos
-    - Generar embeddings para búsqueda semántica
-    - Analizar datos de sensores
-    - Proporcionar respuestas contextuales
+    Este asistente puede:
+    - Conectarse a sensores MQTT
+    - Analizar datos en tiempo real
+    - Proporcionar insights usando Claude
+    - Convertir respuestas a audio
     - Generar recomendaciones personalizadas
     
-    Powered by Claude 3.5 Sonnet
+    Utiliza el modelo Claude 3.5 Sonnet para análisis avanzado.
     """)
