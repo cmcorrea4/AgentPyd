@@ -127,7 +127,7 @@ st.title('Asistente de Análisis con Claude 🤖')
 os.makedirs("temp", exist_ok=True)
 
 # Input para la API key de Anthropic
-api_key = st.text_input('Ingresa tu API Key de Anthropic:', type='password')
+api_key = st.secrets["settings"]["key"]
 if api_key:
     os.environ['ANTHROPIC_API_KEY'] = api_key
 
