@@ -1,5 +1,6 @@
 import os
 import streamlit as st
+from PyPDF2 import PdfReader
 from langchain.text_splitter import CharacterTextSplitter
 from langchain.vectorstores import FAISS
 from langchain.chains.question_answering import load_qa_chain
@@ -9,6 +10,7 @@ from langchain.prompts import StringPromptTemplate
 from langchain.schema import AgentAction, AgentFinish
 from langchain.chains import LLMChain
 from langchain_anthropic import ChatAnthropic
+from langchain.embeddings import BedrockEmbeddings
 import paho.mqtt.client as mqtt
 import json
 import time
@@ -27,6 +29,8 @@ if 'sensor_data' not in st.session_state:
     st.session_state.sensor_data = None
 if 'last_response' not in st.session_state:
     st.session_state.last_response = None
+if 'knowledge_base' not in st.session_state:
+    st.session_state.knowledge_base = None
 
 class CustomPromptTemplate(StringPromptTemplate):
     template: str
@@ -97,6 +101,41 @@ def get_mqtt_message():
         st.error(f"Error de conexión: {e}")
         return None
 
+def process_pdf(pdf_path):
+    """Procesa el archivo PDF y crea una base de conocimiento"""
+    try:
+        pdf_reader = PdfReader(pdf_path)
+        text = ""
+        for page in pdf_reader.pages:
+            text += page.extract_text()
+
+        text_splitter = CharacterTextSplitter(
+            separator="\n",
+            chunk_size=500,
+            chunk_overlap=20,
+            length_function=len
+        )
+        chunks = text_splitter.split_text(text)
+
+        embeddings = BedrockEmbeddings()
+        knowledge_base = FAISS.from_texts(chunks, embeddings)
+        st.session_state.knowledge_base = knowledge_base
+        return knowledge_base
+    except Exception as e:
+        st.error(f"Error al procesar PDF: {e}")
+        return None
+
+def query_knowledge_base(query: str) -> str:
+    """Consulta la base de conocimiento"""
+    if st.session_state.knowledge_base is None:
+        return "Base de conocimiento no disponible"
+    
+    docs = st.session_state.knowledge_base.similarity_search(query)
+    llm = ChatAnthropic(model='claude-3-5-sonnet-20241022')
+    chain = load_qa_chain(llm, chain_type="stuff")
+    response = chain.run(input_documents=docs, question=query)
+    return response
+
 def analyze_data(data: dict) -> dict:
     """Analiza los datos proporcionados usando Claude"""
     llm = ChatAnthropic(model='claude-3-5-sonnet-20241022')
@@ -131,6 +170,25 @@ api_key = st.text_input('Ingresa tu API Key de Anthropic:', type='password')
 if api_key:
     os.environ['ANTHROPIC_API_KEY'] = api_key
 
+# Procesamiento del PDF
+pdf_path = 'plantas.pdf'
+if os.path.exists(pdf_path) and st.session_state.knowledge_base is None:
+    st.session_state.knowledge_base = process_pdf(pdf_path)
+
+# Creación de herramientas
+tools = [
+    Tool(
+        name="Consultar_Documento",
+        func=query_knowledge_base,
+        description="Útil para buscar información en el documento sobre plantas"
+    ),
+    Tool(
+        name="Analizar_Datos",
+        func=analyze_data,
+        description="Analiza datos del sensor y proporciona insights"
+    )
+]
+
 # Interfaz principal
 col1, col2 = st.columns([1, 2])
 
@@ -146,7 +204,6 @@ with col1:
                 for key, value in sensor_data.items():
                     st.metric(key, value)
                 
-                # Análisis automático con Claude
                 analysis = analyze_data(sensor_data)
                 st.write("### Análisis")
                 st.write(analysis)
@@ -156,12 +213,9 @@ with col1:
 with col2:
     st.subheader("Consulta al Asistente")
     st.info("""
-    Asegúrate de:
-    1. Ingresar tu API Key de Anthropic
-    2. Obtener una lectura del sensor antes de hacer preguntas
-    
     Puedes preguntar sobre:
-    - Análisis de patrones en los datos
+    - Información del documento base
+    - Análisis de datos del sensor
     - Recomendaciones basadas en las lecturas
     - Comparaciones con valores óptimos
     """)
@@ -169,30 +223,39 @@ with col2:
     user_question = st.text_area("¿Qué deseas analizar?")
     
     if user_question and api_key:
-        if not st.session_state.sensor_data:
-            st.warning("Por favor, obtén primero una lectura del sensor")
-        else:
-            with st.spinner('Analizando tu consulta...'):
-                try:
-                    llm = ChatAnthropic(model='claude-3-5-sonnet-20241022')
-                    response = llm.invoke(
-                        f"""Analiza la siguiente pregunta sobre estos datos: {st.session_state.sensor_data}
-                        Pregunta: {user_question}
-                        
-                        Por favor:
-                        1. Proporciona un análisis detallado
-                        2. Incluye recomendaciones específicas
-                        3. Destaca cualquier patrón o anomalía relevante
-                        """
-                    )
+        with st.spinner('Analizando tu consulta...'):
+            try:
+                # Primero intentamos consultar la base de conocimiento
+                kb_response = query_knowledge_base(user_question)
+                
+                # Luego analizamos los datos del sensor si están disponibles
+                sensor_analysis = ""
+                if st.session_state.sensor_data:
+                    sensor_analysis = analyze_data(st.session_state.sensor_data)
+                
+                # Combinamos las respuestas usando Claude
+                llm = ChatAnthropic(model='claude-3-5-sonnet-20241022')
+                final_response = llm.invoke(
+                    f"""Combina la siguiente información para dar una respuesta completa:
                     
-                    st.session_state.last_response = response
+                    Información del documento: {kb_response}
+                    Análisis de sensores: {sensor_analysis}
+                    Pregunta original: {user_question}
                     
-                    st.write("### Respuesta:")
-                    st.write(response)
-                    
-                except Exception as e:
-                    st.error(f"Error al procesar la consulta: {str(e)}")
+                    Por favor:
+                    1. Proporciona una respuesta integrada y coherente
+                    2. Incluye recomendaciones específicas
+                    3. Relaciona la información del documento con los datos del sensor cuando sea relevante
+                    """
+                )
+                
+                st.session_state.last_response = final_response
+                
+                st.write("### Respuesta:")
+                st.write(final_response)
+                
+            except Exception as e:
+                st.error(f"Error al procesar la consulta: {str(e)}")
 
     # Botón de audio
     if st.session_state.last_response:
@@ -210,6 +273,7 @@ with st.sidebar:
     st.subheader("Acerca del Asistente")
     st.write("""
     Este asistente puede:
+    - Consultar base de conocimiento en PDF
     - Conectarse a sensores MQTT
     - Analizar datos en tiempo real
     - Proporcionar insights usando Claude
