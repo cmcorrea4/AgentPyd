@@ -172,7 +172,7 @@ except:
 os.environ['OPENAI_API_KEY'] = st.secrets["settings"]["key"]
 
 # Procesamiento del PDF
-pdf_path = 'plantas2.pdf'
+pdf_path = 'Plantas2.pdf'
 if os.path.exists(pdf_path):
     pdf_reader = PdfReader(pdf_path)
     text = ""
