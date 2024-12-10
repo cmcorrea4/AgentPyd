@@ -236,7 +236,7 @@ if os.path.exists(pdf_path):
     Asegúrate de:
     1. Consultar siempre las condiciones actuales primero
     2. Analizar si las condiciones son adecuadas usando las herramientas correspondientes
-    3. Buscar información específica sobre plantas en el documento
+    3. Buscar información específica sobre plantas en el documento y mencionar las plantas para las condiciones dadas
     4. Proporcionar recomendaciones basadas en las condiciones actuales
     
     {agent_scratchpad}
