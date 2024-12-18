@@ -157,9 +157,8 @@ with col2:
     st.subheader("Consulta al Asistente")
     st.info("""
     Asegúrate de:
-    1. Ingresar tu API Key de Anthropic
-    2. Obtener una lectura del sensor antes de hacer preguntas
-    
+    1. Obtener una lectura del sensor antes de hacer preguntas
+     
     Puedes preguntar sobre:
     - Análisis de patrones en los datos
     - Recomendaciones basadas en las lecturas
