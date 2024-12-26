@@ -18,7 +18,7 @@ from PIL import Image
 from gtts import gTTS
 
 # Configuración MQTT
-MQTT_BROKER = "157.230.214.127"
+MQTT_BROKER = "broker.mqttdashboard.com"
 MQTT_PORT = 1883
 MQTT_TOPIC = "sensor_st"
 
