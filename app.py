@@ -20,7 +20,7 @@ from gtts import gTTS
 # Configuración MQTT
 MQTT_BROKER = "broker.mqttdashboard.com"
 MQTT_PORT = 1883
-MQTT_TOPIC = "sensor_st"
+MQTT_TOPIC = "Sensor/THP"
 
 # Variables de estado
 if 'sensor_data' not in st.session_state:
